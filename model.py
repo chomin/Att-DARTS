@@ -1,12 +1,14 @@
-import  torch
-import  torch.nn as nn
-from    operations import *
-from    utils import drop_path
+from attentions import ATTNS
+from operations import FactorizedReduce, ReLUConvBN, OPS, Identity
+from utils import drop_path
+
+import torch
+import torch.nn as nn
 
 
 class Cell(nn.Module):
 
-    def __init__(self, genotype, C_prev_prev, C_prev, C, reduction, reduction_prev):
+    def __init__(self, genotype, C_prev_prev, C_prev, C, reduction, reduction_prev, height, width):
         """
 
         :param genotype:
@@ -27,34 +29,56 @@ class Cell(nn.Module):
         self.preprocess1 = ReLUConvBN(C_prev, C, 1, 1, 0)
 
         if reduction:
-            op_names, indices = zip(*genotype.reduce)
+            first_layers, indices, second_layers = zip(*genotype.reduce)
             concat = genotype.reduce_concat
+            bottleneck = genotype.reduce_bottleneck
         else:
-            op_names, indices = zip(*genotype.normal)
+            first_layers, indices, second_layers = zip(*genotype.normal)
             concat = genotype.normal_concat
-        self._compile(C, op_names, indices, concat, reduction)
+            bottleneck = genotype.normal_bottleneck
+        self._compile(C, first_layers, second_layers, indices, concat, reduction, bottleneck, height, width)
 
-    def _compile(self, C, op_names, indices, concat, reduction):
+    def _compile(self, C, first_layers, second_layers, indices, concat, reduction, bottleneck, height, width):
         """
 
         :param C:
-        :param op_names:
+        :param first_layers:
         :param indices:
         :param concat:
         :param reduction:
         :return:
         """
-        assert len(op_names) == len(indices)
+        assert len(first_layers) == len(indices)
 
-        self._steps = len(op_names) // 2
+        self._steps = len(first_layers) // 2
         self._concat = concat
         self.multiplier = len(concat)
 
-        self._ops = nn.ModuleList()
-        for name, index in zip(op_names, indices):
+        self._first_layers = nn.ModuleList()
+        self._second_layers = nn.ModuleList()
+        for first_layer_name, second_layer_name, index in zip(first_layers, second_layers, indices):
             stride = 2 if reduction and index < 2 else 1
-            op = OPS[name](C, stride, True)
-            self._ops += [op]
+            if first_layer_name in OPS:
+                first_layer = OPS[first_layer_name](C, stride, True)
+            elif reduction:  # for mixed
+                first_layer = nn.Sequential(OPS['skip_connect'](C, stride, False),
+                                            ATTNS[first_layer_name](C, height, width))
+            else:
+                first_layer = ATTNS[first_layer_name](C, height, width)
+            self._first_layers += [first_layer]
+
+            if second_layer_name:
+                stride = 1
+                if second_layer_name in OPS:
+                    second_layer = OPS[second_layer_name](C, stride, True)
+                else:
+                    second_layer = ATTNS[second_layer_name](C, height, width)
+                self._second_layers += [second_layer]
+
+        self._bottleneck = None
+        if bottleneck:
+            self._bottleneck = ATTNS[bottleneck](C * self.multiplier, height, width)
+
         self._indices = indices
 
     def forward(self, s0, s1, drop_prob):
@@ -72,20 +96,36 @@ class Cell(nn.Module):
         for i in range(self._steps):
             h1 = states[self._indices[2 * i]]
             h2 = states[self._indices[2 * i + 1]]
-            op1 = self._ops[2 * i]
-            op2 = self._ops[2 * i + 1]
+            op1 = self._first_layers[2 * i]
+            op2 = self._first_layers[2 * i + 1]
             h1 = op1(h1)
             h2 = op2(h2)
 
-            if self.training and drop_prob > 0.:
-                if not isinstance(op1, Identity):
-                    h1 = drop_path(h1, drop_prob)
-                if not isinstance(op2, Identity):
-                    h2 = drop_path(h2, drop_prob)
+            if self._second_layers:
+                at1 = self._second_layers[2 * i]
+                at2 = self._second_layers[2 * i + 1]
+                h1 = at1(h1)
+                h2 = at2(h2)
+
+                if self.training and drop_prob > 0.:
+                    if not isinstance(op1, Identity) and not isinstance(at1, Identity):
+                        h1 = drop_path(h1, drop_prob)
+                    if not isinstance(op2, Identity) and not isinstance(at2, Identity):
+                        h2 = drop_path(h2, drop_prob)
+            else:
+                if self.training and drop_prob > 0.:
+                    if not isinstance(op1, Identity):
+                        h1 = drop_path(h1, drop_prob)
+                    if not isinstance(op2, Identity):
+                        h2 = drop_path(h2, drop_prob)
 
             s = h1 + h2
             states += [s]
-        return torch.cat([states[i] for i in self._concat], dim=1)
+
+        out = torch.cat([states[i] for i in self._concat], dim=1)
+        if self._bottleneck:
+            out = self._bottleneck(out)
+        return out
 
 
 class AuxiliaryHeadCIFAR(nn.Module):
@@ -147,6 +187,7 @@ class NetworkCIFAR(nn.Module):
 
         stem_multiplier = 3
         C_curr = stem_multiplier * C
+        height_curr = 32
         self.stem = nn.Sequential(
             nn.Conv2d(3, C_curr, 3, padding=1, bias=False),
             nn.BatchNorm2d(C_curr)
@@ -158,10 +199,11 @@ class NetworkCIFAR(nn.Module):
         for i in range(layers):
             if i in [layers // 3, 2 * layers // 3]:
                 C_curr *= 2
+                height_curr //= 2
                 reduction = True
             else:
                 reduction = False
-            cell = Cell(genotype, C_prev_prev, C_prev, C_curr, reduction, reduction_prev)
+            cell = Cell(genotype, C_prev_prev, C_prev, C_curr, reduction, reduction_prev, height_curr, height_curr)
             reduction_prev = reduction
             self.cells += [cell]
             C_prev_prev, C_prev = C_prev, cell.multiplier * C_curr
@@ -186,16 +228,6 @@ class NetworkCIFAR(nn.Module):
         return logits, logits_aux
 
 
-
-
-
-
-
-
-
-
-
-
 class NetworkImageNet(nn.Module):
 
     def __init__(self, C, num_classes, layers, auxiliary, genotype):
@@ -218,16 +250,18 @@ class NetworkImageNet(nn.Module):
         )
 
         C_prev_prev, C_prev, C_curr = C, C, C
+        height_curr = 128
 
         self.cells = nn.ModuleList()
         reduction_prev = True
         for i in range(layers):
             if i in [layers // 3, 2 * layers // 3]:
                 C_curr *= 2
+                height_curr //= 2
                 reduction = True
             else:
                 reduction = False
-            cell = Cell(genotype, C_prev_prev, C_prev, C_curr, reduction, reduction_prev)
+            cell = Cell(genotype, C_prev_prev, C_prev, C_curr, reduction, reduction_prev, height_curr, height_curr)
             reduction_prev = reduction
             self.cells += [cell]
             C_prev_prev, C_prev = C_prev, cell.multiplier * C_curr

@@ -1,15 +1,10 @@
-import  torch
-import  torch.nn as nn
-
-
-
-
-
+import torch
+import torch.nn as nn
 
 # OPS is a set of layers with same input/output channel.
 
 OPS = {
-    'none':         lambda C, stride, affine: Zero(stride),
+    'none': lambda C, stride, affine: Zero(stride),
     'avg_pool_3x3': lambda C, stride, affine: nn.AvgPool2d(3, stride=stride, padding=1, count_include_pad=False),
     'max_pool_3x3': lambda C, stride, affine: nn.MaxPool2d(3, stride=stride, padding=1),
     'skip_connect': lambda C, stride, affine: Identity() if stride == 1 else FactorizedReduce(C, C, affine=affine),
@@ -21,8 +16,10 @@ OPS = {
 
     'conv_7x1_1x7': lambda C, stride, affine: nn.Sequential(
         nn.ReLU(inplace=False),
-        nn.Conv2d(C, C, (1, 7), stride=(1, stride), padding=(0, 3), bias=False),
-        nn.Conv2d(C, C, (7, 1), stride=(stride, 1), padding=(3, 0), bias=False),
+        nn.Conv2d(C, C, (1, 7), stride=(1, stride),
+                  padding=(0, 3), bias=False),
+        nn.Conv2d(C, C, (7, 1), stride=(stride, 1),
+                  padding=(3, 0), bias=False),
         nn.BatchNorm2d(C, affine=affine)
     ),
 }
@@ -32,6 +29,7 @@ class ReLUConvBN(nn.Module):
     """
     Stack of relu-conv-bn
     """
+
     def __init__(self, C_in, C_out, kernel_size, stride, padding, affine=True):
         """
 
@@ -46,7 +44,8 @@ class ReLUConvBN(nn.Module):
 
         self.op = nn.Sequential(
             nn.ReLU(inplace=False),
-            nn.Conv2d(C_in, C_out, kernel_size, stride=stride, padding=padding, bias=False),
+            nn.Conv2d(C_in, C_out, kernel_size, stride=stride,
+                      padding=padding, bias=False),
             nn.BatchNorm2d(C_out, affine=affine)
         )
 
@@ -58,6 +57,7 @@ class DilConv(nn.Module):
     """
     relu-dilated conv-bn
     """
+
     def __init__(self, C_in, C_out, kernel_size, stride, padding, dilation, affine=True):
         """
 
@@ -88,6 +88,7 @@ class SepConv(nn.Module):
     """
     implemented separate convolution via pytorch groups parameters
     """
+
     def __init__(self, C_in, C_out, kernel_size, stride, padding, affine=True):
         """
 
@@ -102,9 +103,11 @@ class SepConv(nn.Module):
 
         self.op = nn.Sequential(
             nn.ReLU(inplace=False),
-            nn.Conv2d(C_in, C_in, kernel_size=kernel_size, stride=stride, padding=padding,
-                      groups=C_in, bias=False),
-            nn.Conv2d(C_in, C_in, kernel_size=1, padding=0, bias=False),
+            nn.Conv2d(C_in, C_in, kernel_size=kernel_size,
+                      stride=stride, padding=padding, groups=C_in, bias=False),
+            # depth-wise conv
+            nn.Conv2d(C_in, C_in, kernel_size=1, padding=0,
+                      bias=False),  # point-wise conv
             nn.BatchNorm2d(C_in, affine=affine),
             nn.ReLU(inplace=False),
             nn.Conv2d(C_in, C_in, kernel_size=kernel_size, stride=1, padding=padding,
@@ -130,6 +133,7 @@ class Zero(nn.Module):
     """
     zero by stride
     """
+
     def __init__(self, stride):
         super(Zero, self).__init__()
 
@@ -158,8 +162,10 @@ class FactorizedReduce(nn.Module):
         assert C_out % 2 == 0
 
         self.relu = nn.ReLU(inplace=False)
-        self.conv_1 = nn.Conv2d(C_in, C_out // 2, 1, stride=2, padding=0, bias=False)
-        self.conv_2 = nn.Conv2d(C_in, C_out // 2, 1, stride=2, padding=0, bias=False)
+        self.conv_1 = nn.Conv2d(C_in, C_out // 2, 1,
+                                stride=2, padding=0, bias=False)
+        self.conv_2 = nn.Conv2d(C_in, C_out // 2, 1,
+                                stride=2, padding=0, bias=False)
         self.bn = nn.BatchNorm2d(C_out, affine=affine)
 
     def forward(self, x):

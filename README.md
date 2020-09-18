@@ -1,116 +1,153 @@
+# Att-DARTS: Differentiable Neural Architecture Search for Attention
 
-## PyTorch 1.0 supported
+The PyTorch implementation of Att-DARTS: Differentiable Neural Architecture Search for Attention.
 
-Currently Only the part of CNN exps.  have been adopted yet.
-I will upload these RNN exps. once completed.
-
-
-```python 
-python train_search.py # search for optimized architecture
-
-python train.py --auxiliary --cutout # use seached architecture to optimize weights
-
-python test.py --auxiliary --model_path cifar10_model.pt # test
-```
-
-This repo. is absolutely based on official impl. from https://github.com/quark0/darts with trivial modificatio to make it run on pytorch 0.4+ version.
-
-# Differentiable Architecture Search
-Code accompanying the paper
-> [DARTS: Differentiable Architecture Search](https://arxiv.org/abs/1806.09055)\
-> Hanxiao Liu, Karen Simonyan, Yiming Yang.\
-> _arXiv:1806.09055_.
-
-<p align="center">
-  <img src="img/darts.png" alt="darts" width="48%">
-</p>
-The algorithm is based on continuous relaxation and gradient descent in the architecture space. It is able to efficiently design high-performance convolutional architectures for image classification (on CIFAR-10 and ImageNet) and recurrent architectures for language modeling (on Penn Treebank and WikiText-2). Only a single GPU is required.
+The codes are based on https://github.com/dragen1860/DARTS-PyTorch.
 
 ## Requirements
+
+* Python == 3.7
+* PyTorch == 1.0.1
+* torchvision == 0.2.2
+* pillow == 6.2.1
+* numpy
+* graphviz
+* requests
+* tqdm
+
+We recommend downloading PyTorch from [here](https://pytorch.org/get-started/previous-versions/#v101).
+
+<!-- If you use pipenv, simply run:
 ```
-Python >= 3.5.5, PyTorch == 0.3.1, torchvision == 0.2.0
+pipenv install
 ```
-NOTE: PyTorch 0.4 is not supported at this moment and would lead to OOM.
+
+Or, using pip:
+```
+pip install -r requirements.txt
+``` -->
 
 ## Datasets
-Instructions for acquiring PTB and WT2 can be found [here](https://github.com/salesforce/awd-lstm-lm). While CIFAR-10 can be automatically downloaded by torchvision, ImageNet needs to be manually downloaded (preferably to a SSD) following the instructions [here](https://github.com/pytorch/examples/tree/master/imagenet).
 
-## Pretrained models
-The easist way to get started is to evaluate our pretrained DARTS models.
+* CIFAR-10/100: automatically downloaded by torchvision to `data` folder.
+* ImageNet (ILSVRC2012 version): manually downloaded following the instructions [here](https://github.com/pytorch/examples/tree/master/imagenet).
 
-**CIFAR-10** ([cifar10_model.pt](https://drive.google.com/file/d/1Y13i4zKGKgjtWBdC0HWLavjO7wvEiGOc/view?usp=sharing))
-```
-cd cnn && python test.py --auxiliary --model_path cifar10_model.pt
-```
-* Expected result: 2.63% test error rate with 3.3M model params.
+## Results
 
-**PTB** ([ptb_model.pt](https://drive.google.com/file/d/1Mt_o6fZOlG-VDF3Q5ModgnAJ9W6f_av2/view?usp=sharing))
-```
-cd rnn && python test.py --model_path ptb_model.pt
-```
-* Expected result: 55.68 test perplexity with 23M model params.
+### CIFAR
 
-**ImageNet** ([imagenet_model.pt](https://drive.google.com/file/d/1AKr6Y_PoYj7j0Upggyzc26W0RVdg4CVX/view?usp=sharing))
-```
-cd cnn && python test_imagenet.py --auxiliary --model_path imagenet_model.pt
-```
-* Expected result: 26.7% top-1 error and 8.7% top-5 error with 4.7M model params.
+|           |        CIFAR-10        |        CIFAR-100        | Params(M) |
+|:----------|:----------------------:|:-----------------------:|:---------:|
+| DARTS     |  2.76   &plusmn; 0.09  |  16.69   &plusmn; 0.28  |    3.3    |
+| Att-DARTS | **2.54** &plusmn; 0.10 | **16.54** &plusmn; 0.40 |  **3.2**  |
 
-## Architecture search (using small proxy models)
-To carry out architecture search using 2nd-order approximation, run
-```
-cd cnn && python train_search.py --unrolled     # for conv cells on CIFAR-10
-cd rnn && python train_search.py --unrolled     # for recurrent cells on PTB
-```
-Note the _validation performance in this step does not indicate the final performance of the architecture_. One must train the obtained genotype/architecture from scratch using full-sized models, as described in the next section.
+### ImageNet
 
-Also be aware that different runs would end up with different local minimum. To get the best result, it is crucial to repeat the search process with different seeds and select the best cell(s) based on validation performance (obtained by training the derived cell from scratch for a small number of epochs). Please refer to fig. 3 and sect. 3.2 in our arXiv paper.
+|           |  top-1   |  top-5  | Params(M) |
+|:----------|:--------:|:-------:|:---------:|
+| DARTS     |   26.7   |   8.7   |    4.7    |
+| Att-DARTS | **26.0** | **8.5** |  **4.6**  |
 
-<p align="center">
-<img src="img/progress_convolutional_normal.gif" alt="progress_convolutional_normal" width="29%">
-<img src="img/progress_convolutional_reduce.gif" alt="progress_convolutional_reduce" width="35%">
-<img src="img/progress_recurrent.gif" alt="progress_recurrent" width="33%">
-</p>
-<p align="center">
-Figure: Snapshots of the most likely normal conv, reduction conv, and recurrent cells over time.
-</p>
+## Usage
 
-## Architecture evaluation (using full-sized models)
-To evaluate our best cells by training from scratch, run
+### Architecture search (using small proxy models)
+
+Our script occupies all available GPUs. Please set environment `CUDA_VISIBLE_DEVICES`.
+
+To carry out architecture search using 2nd-order approximation, run:
+
+```sh
+python train_search.py --unrolled
 ```
-cd cnn && python train.py --auxiliary --cutout            # CIFAR-10
-cd rnn && python train.py                                 # PTB
-cd rnn && python train.py --data ../data/wikitext-2 \     # WT2
-            --dropouth 0.15 --emsize 700 --nhidlast 700 --nhid 700 --wdecay 5e-7
-cd cnn && python train_imagenet.py --auxiliary            # ImageNet
-```
-Customized architectures are supported through the `--arch` flag once specified in `genotypes.py`.
 
-The CIFAR-10 result at the end of training is subject to variance due to the non-determinism of cuDNN back-prop kernels. _It would be misleading to report the result of only a single run_. By training our best cell from scratch, one should expect the average test error of 10 independent runs to fall in the range of 2.76 +/- 0.09% with high probability.
+The found cell will be saved in `genotype.json`.
+Our resultant `Att_DARTS` is written in [genotypes.py](genotypes.py).
 
-<p align="center">
-<img src="img/cifar10.png" alt="cifar10" width="36%">
-<img src="img/imagenet.png" alt="ptb" width="29%">
-<img src="img/ptb.png" alt="ptb" width="30%">
-</p>
-<p align="center">
-Figure: Expected learning curves on CIFAR-10 (4 runs), ImageNet and PTB.
-</p>
+Inserting an attention at other locations is supported through the `--location` flag.
+The locations are specified at `AttLocation` in [model_search.py](model_search.py).
 
-## Visualization
-Package [graphviz](https://graphviz.readthedocs.io/en/stable/index.html) is required to visualize the learned cells
-```
-python visualize.py DARTS
-```
-where `DARTS` can be replaced by any customized architectures in `genotypes.py`.
+### Architecture evaluation (using full-sized models)
 
-## Citation
-If you use any part of this code in your research, please cite our [paper](https://arxiv.org/abs/1806.09055):
+To evaluate our best cells by training from scratch, run:
+
+```sh
+python train_CIFAR10.py --auxiliary --cutout --arch Att_DARTS  # CIFAR-10
+python train_CIFAR100.py --auxiliary --cutout --arch Att_DARTS  # CIFAR-100
+python train_ImageNet.py --auxiliary --arch Att_DARTS  # ImageNet
 ```
-@article{liu2018darts,
-  title={DARTS: Differentiable Architecture Search},
-  author={Liu, Hanxiao and Simonyan, Karen and Yang, Yiming},
-  journal={arXiv preprint arXiv:1806.09055},
-  year={2018}
+
+Customized architectures are supported through the `--arch` flag once specified in [genotypes.py](genotypes.py).
+
+Also, you can designate the search result in `.json` through the `--arch_path` flag:
+
+```sh
+python train_CIFAR10.py --auxiliary --cutout --arch_path ${PATH}  # CIFAR-10
+python train_CIFAR100.py --auxiliary --cutout --arch_path ${PATH}  # CIFAR-100
+python train_ImageNet.py --auxiliary --arch_path ${PATH}  # ImageNet
+```
+
+where `${PATH}` should be replaced by the path to the `.json`.
+
+The trained model is saved in `trained.pt`.
+After training, the test script automatically runs.
+
+Also, you can always test the `trained.pt` as indicated below.
+
+### Test (using full-sized pretrained models)
+
+To test a pretrained model saved in `.pt` , run:
+
+```sh
+python test_CIFAR10.py --auxiliary --model_path ${PATH} --arch Att_DARTS  # CIFAR-10
+python test_CIFAR100.py --auxiliary --model_path ${PATH} --arch Att_DARTS  # CIFAR-100
+python test_imagenet.py --auxiliary --model_path ${PATH} --arch Att_DARTS  # ImageNet
+```
+
+where `${PATH}` should be replaced by the path to `.pt`.
+
+You can designate our pretrained models ([cifar10_att.pt](cifar10_att.pt), [cifar100_att.pt](cifar100_att.pt), [imagenet_att.pt](imagenet_att.pt)) or the saved `trained.pt` in [Architecture Evaluation](#architecture-evaluation-using-full-sized-models).
+
+Also, we support customized architectures specified in [genotypes.py](genotypes.py) through the `--arch` flag, or architectures specified in `.json` through the `--arch_path` flag.
+
+### Visualization
+
+You can visualize the found cells in [genotypes.py](genotypes.py).
+For example, you can visualize `Att-DARTS` running:
+
+```sh
+python visualize.py Att_DARTS
+```
+
+Also, you can visualize the saved cell in `.json`:
+
+```sh
+python visualize.py genotype.json
+```
+
+## Related Work
+
+### Attention modules
+
+This repository includes the following attentions:
+
+* Squeeze-and-Excitation
+  ([paper](https://arxiv.org/abs/1709.01507) / [code (unofficial)](https://github.com/moskomule/senet.pytorch))
+* Gather-Excite
+  ([paper](https://arxiv.org/abs/1810.12348) / [code (unofficial)](https://github.com/BayesWatch/pytorch-GENet))
+* BAM
+  ([paper](https://arxiv.org/abs/1807.06514) / [code](https://github.com/Jongchan/attention-module))
+* CBAM
+  ([paper](https://arxiv.org/abs/1807.06521) / [code](https://github.com/Jongchan/attention-module))
+* A<sup>2</sup>-Nets
+  ([paper](https://arxiv.org/abs/1810.11579) / [code (unofficial)](https://github.com/gjylt/DoubleAttentionNet))
+
+## Reference
+
+```bibtex
+@inproceedings{att-darts2020IJCNN,
+author = {Nakai, Kohei and Matsubara, Takashi and Uehara, Kuniaki},
+booktitle = {The International Joint Conference on Neural Networks (IJCNN)},
+title = {{Att-DARTS: Differentiable Neural Architecture Search for Attention}},
+year = {2020}
 }
 ```

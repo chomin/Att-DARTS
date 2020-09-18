@@ -1,6 +1,11 @@
-import  torch
-import  numpy as np
-from    torch import optim, autograd
+import torch
+from torch import optim, autograd, nn
+
+from model_search import Network
+
+use_DataParallel = torch.cuda.device_count() > 1
+use_cuda = torch.cuda.is_available()
+device = torch.device('cuda' if use_cuda else 'cpu')
 
 
 def concat(xs):
@@ -13,24 +18,24 @@ def concat(xs):
     return torch.cat([x.view(-1) for x in xs])
 
 
-
-
 class Arch:
 
-    def __init__(self, model, args):
+    def __init__(self, model, criterion, args):
         """
 
         :param model: network
         :param args:
         """
-        self.momentum = args.momentum # momentum for optimizer of theta
-        self.wd = args.wd # weight decay for optimizer of theta
-        self.model = model # main model with respect to theta and alpha
+        self.momentum = args.momentum  # momentum for optimizer of theta
+        self.wd = args.wd  # weight decay for optimizer of theta
+        self.model = model  # main model with respect to theta and alpha
+        self.criterion = criterion
         # this is the optimizer to optimize alpha parameter
-        self.optimizer = optim.Adam(self.model.arch_parameters(),
-                                          lr=args.arch_lr,
-                                          betas=(0.5, 0.999),
-                                          weight_decay=args.arch_wd)
+        self.optimizer = optim.Adam(
+            self.model.module.arch_and_attn_parameters() if use_DataParallel else self.model.arch_and_attn_parameters(),
+            lr=args.arch_lr,
+            betas=(0.5, 0.999),
+            weight_decay=args.arch_wd)
 
     def comp_unrolled_model(self, x, target, eta, optimizer):
         """
@@ -42,7 +47,8 @@ class Arch:
         :return:
         """
         # forward to get loss
-        loss = self.model.loss(x, target)
+        logits = self.model(x)
+        loss = self.criterion(logits, target)
         # flatten current weights
         theta = concat(self.model.parameters()).detach()
         # theta: torch.Size([1930618])
@@ -96,10 +102,12 @@ class Arch:
         :param target_valid:
         :return:
         """
-        loss = self.model.loss(x_valid, target_valid)
+        logits = self.model(x_valid)
+        loss = self.criterion(logits, target_valid)
         # both alpha and theta require grad but only alpha optimizer will
         # step in current phase.
         loss.backward()
+        # print('back')
 
     def backward_step_unrolled(self, x_train, target_train, x_valid, target_valid, eta, optimizer):
         """
@@ -116,12 +124,17 @@ class Arch:
         # theta_pi = theta - lr * grad
         unrolled_model = self.comp_unrolled_model(x_train, target_train, eta, optimizer)
         # calculate loss on theta_pi
-        unrolled_loss = unrolled_model.loss(x_valid, target_valid)
+        unrolled_logits = unrolled_model(x_valid)
+        unrolled_loss = self.criterion(unrolled_logits, target_valid)
 
         # this will update theta_pi model, but NOT theta model
         unrolled_loss.backward()
         # grad(L(w', a), a), part of Eq. 6
-        dalpha = [v.grad for v in unrolled_model.arch_parameters()]
+        # dalpha = [v.grad for v in unrolled_model.arch_and_attn_parameters()]
+        dalpha = [v.grad for v in unrolled_model.module.arch_and_attn_parameters()] if use_DataParallel else [v.grad for
+                                                                                                              v in
+                                                                                                              unrolled_model.arch_and_attn_parameters()]
+        # vector = [v.grad.data for v in unrolled_model.parameters()]
         vector = [v.grad.data for v in unrolled_model.parameters()]
         implicit_grads = self.hessian_vector_product(vector, x_train, target_train)
 
@@ -130,11 +143,18 @@ class Arch:
             g.data.sub_(eta, ig.data)
 
         # write updated alpha into original model
-        for v, g in zip(self.model.arch_parameters(), dalpha):
-            if v.grad is None:
-                v.grad = g.data
-            else:
-                v.grad.data.copy_(g.data)
+        if use_DataParallel:
+            for v, g in zip(self.model.module.arch_and_attn_parameters(), dalpha):
+                if v.grad is None:
+                    v.grad = g.data
+                else:
+                    v.grad.data.copy_(g.data)
+        else:
+            for v, g in zip(self.model.arch_and_attn_parameters(), dalpha):
+                if v.grad is None:
+                    v.grad = g.data
+                else:
+                    v.grad.data.copy_(g.data)
 
     def construct_model_from_theta(self, theta):
         """
@@ -144,20 +164,63 @@ class Arch:
         :param theta: flatten weights, need to reshape to original shape
         :return:
         """
-        model_new = self.model.new()
-        model_dict = self.model.state_dict()
+        model_new = self.model.module.new() if use_DataParallel else self.model.new()
+        model_dict = self.model.module.state_dict() if use_DataParallel else self.model.state_dict()
 
         params, offset = {}, 0
         for k, v in self.model.named_parameters():
             v_length = v.numel()
             # restore theta[] value to original shape
-            params[k] = theta[offset: offset + v_length].view(v.size())
+            name = k[7:] if use_DataParallel else k
+            params[name] = theta[offset: offset + v_length].view(v.size())
             offset += v_length
 
         assert offset == len(theta)
         model_dict.update(params)
-        model_new.load_state_dict(model_dict)
-        return model_new.cuda()
+
+        def load_state_dict(model: Network, state_dict, strict=True):
+            """Copies parameters and buffers from :attr:`state_dict` into
+            this module and its descendants. If :attr:`strict` is ``True`` then
+            the keys of :attr:`state_dict` must exactly match the keys returned
+            by this module's :func:`state_dict()` function.
+
+            Arguments:
+                state_dict (dict): A dict containing parameters and
+                    persistent buffers.
+                strict (bool): Strictly enforce that the keys in :attr:`state_dict`
+                    match the keys returned by this module's `:func:`state_dict()`
+                    function.
+                    :param strict:
+                    :param state_dict:
+                    :param model:
+            """
+            own_state = model.state_dict()
+            for name, param in state_dict.items():
+                if name in own_state:
+                    if isinstance(param, torch.nn.Parameter):
+                        # backwards compatibility for serialized parameters
+                        param = param.detach()
+                    try:
+                        own_state[name].copy_(param)
+                    except Exception:
+                        raise RuntimeError('While copying the parameter named {}, '
+                                           'whose dimensions in the model are {} and '
+                                           'whose dimensions in the checkpoint are {}.'
+                                           .format(name, own_state[name].size(), param.size()))
+                elif strict:
+                    raise KeyError('unexpected key "{}" in state_dict'
+                                   .format(name))
+            if strict:
+                missing = set(own_state.keys()) - set(state_dict.keys())
+                if len(missing) > 0:
+                    raise KeyError('missing keys in state_dict: "{}"'.format(missing))
+
+        # model_new.load_state_dict(model_dict)
+        load_state_dict(model_new, model_dict)
+
+        if use_DataParallel:
+            model_new = nn.DataParallel(model_new)
+        return model_new.to(device)
 
     def hessian_vector_product(self, vector, x, target, r=1e-2):
         """
@@ -174,22 +237,25 @@ class Arch:
         for p, v in zip(self.model.parameters(), vector):
             # w+ = w + R * v
             p.data.add_(R, v)
-        loss = self.model.loss(x, target)
+        logits = self.model(x)
+        loss = self.criterion(logits, target)
         # gradient with respect to alpha
-        grads_p = autograd.grad(loss, self.model.arch_parameters())
-
+        grads_p = autograd.grad(loss,
+                                self.model.module.arch_and_attn_parameters() if use_DataParallel else self.model.arch_and_attn_parameters())
 
         for p, v in zip(self.model.parameters(), vector):
             # w- = (w+R*v) - 2R*v
             p.data.sub_(2 * R, v)
-        loss = self.model.loss(x, target)
-        grads_n = autograd.grad(loss, self.model.arch_parameters())
+        logits = self.model(x)
+        loss = self.criterion(logits, target)
+        grads_n = autograd.grad(loss,
+                                self.model.module.arch_and_attn_parameters() if use_DataParallel else self.model.arch_and_attn_parameters())
 
         for p, v in zip(self.model.parameters(), vector):
             # w = (w+R*v) - 2R*v + R*v
             p.data.add_(R, v)
 
-        h= [(x - y).div_(2 * R) for x, y in zip(grads_p, grads_n)]
+        h = [(x - y).div_(2 * R) for x, y in zip(grads_p, grads_n)]
         # h len: 2 h0 torch.Size([14, 8])
         # print('h len:', len(h), 'h0', h[0].shape)
         return h
